@@ -38,8 +38,8 @@ HELP_TEXT = (
     "  列出本群所有登记\n"
     "/time help\n"
     "  显示本帮助\n"
-    "/alias <别名>\n"
-    "  设置全局显示别名\n"
+    "/alias @成员 <别名>\n"
+    "  为该成员设置仅你自己可见的名片\n"
     f"{DIVIDER}\n"
     "管理员命令\n"
     "/time admin remove <user_id>\n"
@@ -49,15 +49,20 @@ HELP_TEXT = (
 )
 
 ALIAS_HELP_TEXT = (
-    "名片用法\n"
+    "名片用法（为群友设置仅你自己可见的备注）\n"
     f"{DIVIDER}\n"
     "/alias\n"
-    "  查看当前名片\n"
-    "/alias <别名>\n"
-    "  设置/修改名片\n"
-    "/alias unset\n"
-    "  清除名片\n"
-    f"（别名最长 {ALIAS_MAX_LEN} 字符，将覆盖 /time 列表中的显示名）"
+    "  查看你已设置的所有名片\n"
+    "/alias @成员\n"
+    "  查看你为该成员设置的名片\n"
+    "/alias @成员 <别名>\n"
+    "  为该成员设置/修改名片\n"
+    "/alias @成员 unset\n"
+    "  清除你对该成员的名片\n"
+    "/alias clear\n"
+    "  清除你设置的全部名片\n"
+    f"（别名最长 {ALIAS_MAX_LEN} 字符；"
+    "/time 列表中的他人显示名将使用你自己设置的名片）"
 )
 
 MODULE_HELP_TEXT = (
@@ -80,13 +85,15 @@ MODULE_HELP_TEXT = (
     "/time unset\n"
     "  移除自己的时区登记\n"
     f"{DIVIDER}\n"
-    "【名片】\n"
+    "【名片】（仅对自己可见的群友备注）\n"
     "/alias\n"
-    "  查看当前别名\n"
-    "/alias <别名>\n"
-    f"  设置/修改别名（≤ {ALIAS_MAX_LEN} 字符）\n"
-    "/alias unset\n"
-    "  清除别名\n"
+    "  查看你设置的全部名片\n"
+    "/alias @成员 <别名>\n"
+    f"  为该成员设置名片（≤ {ALIAS_MAX_LEN} 字符）\n"
+    "/alias @成员 unset\n"
+    "  清除对该成员的名片\n"
+    "/alias clear\n"
+    "  清除你设置的全部名片\n"
     f"{DIVIDER}\n"
     "【帮助】\n"
     "/help\n"
@@ -115,7 +122,8 @@ class TimePlugin(Star):
         super().__init__(context)
         self._lock = asyncio.Lock()
         self._data: dict[str, dict[str, dict[str, Any]]] = {}
-        self._aliases: dict[str, str] = {}
+        # 名片：{owner_uid: {target_uid: alias}} —— owner 对 target 的专属备注
+        self._aliases: dict[str, dict[str, str]] = {}
 
     async def initialize(self):
         """从框架 KV 存储加载数据到内存缓存。"""
@@ -127,10 +135,26 @@ class TimePlugin(Star):
             self._data = {}
         try:
             loaded_alias = await self.get_kv_data(ALIAS_KV_KEY, {})
+            migrated: dict[str, dict[str, str]] = {}
+            dropped_legacy = 0
             if isinstance(loaded_alias, dict):
-                self._aliases = {str(k): str(v) for k, v in loaded_alias.items()}
-            else:
-                self._aliases = {}
+                for owner, value in loaded_alias.items():
+                    if isinstance(value, dict):
+                        inner = {
+                            str(tgt): str(alias)
+                            for tgt, alias in value.items()
+                            if alias
+                        }
+                        if inner:
+                            migrated[str(owner)] = inner
+                    else:
+                        # 旧格式：{uid: 全局别名字符串}，已弃用
+                        dropped_legacy += 1
+            self._aliases = migrated
+            if dropped_legacy:
+                logger.warning(
+                    f"[time] dropped {dropped_legacy} legacy global alias entries"
+                )
         except Exception as e:
             logger.error(f"[time] failed to load alias data: {e}")
             self._aliases = {}
@@ -149,10 +173,18 @@ class TimePlugin(Star):
             except Exception as e:
                 logger.error(f"[time] failed to save alias data: {e}")
 
-    def _display_name(self, uid: str, info: dict | None = None) -> str:
-        alias = self._aliases.get(str(uid))
-        if alias:
-            return alias
+    def _display_name(
+        self,
+        uid: str,
+        info: dict | None = None,
+        viewer: str | None = None,
+    ) -> str:
+        if viewer:
+            owner_map = self._aliases.get(str(viewer))
+            if owner_map:
+                alias = owner_map.get(str(uid))
+                if alias:
+                    return alias
         if info and info.get("name"):
             return info["name"]
         return str(uid)
@@ -260,41 +292,92 @@ class TimePlugin(Star):
 
     @filter.command("alias", alias={"别名"})
     async def alias_cmd(self, event: AstrMessageEvent):
-        """查看或设置自己的全局显示别名；/alias help 查看完整用法"""
+        """为群友设置仅自己可见的名片；/alias help 查看完整用法"""
         tokens = self._strip_cmd_prefix(
             event.message_str or "", names=("alias", "别名")
         )
-        uid = str(event.get_sender_id())
+        at_targets = self._extract_at_targets(event)
+        owner = str(event.get_sender_id())
+        unset_kw = {"unset", "remove", "del", "delete", "移除", "删除", "清除"}
+        clear_kw = {"clear", "清空", "全部清除", "reset"}
 
-        if not tokens:
-            current = self._aliases.get(uid)
-            if current:
-                yield event.plain_result(
-                    f"你当前的名片：{current}\n"
-                    "修改：/alias <新别名>\n"
-                    "清除：/alias unset"
-                )
-            else:
-                yield event.plain_result(
-                    "你还没有设置名片\n"
-                    "设置：/alias <别名>"
-                )
+        # 清掉 tokens 中残留的 @ 文本片段（不同平台保留行为不同）
+        clean = [t for t in tokens if not t.startswith("@")]
+
+        if not at_targets:
+            if not clean:
+                owned = self._aliases.get(owner) or {}
+                if not owned:
+                    yield event.plain_result(
+                        "你还没有为任何人设置名片\n"
+                        "设置：/alias @成员 <别名>"
+                    )
+                    return
+                lines = [f"你设置的名片（{len(owned)}）", DIVIDER]
+                for tgt, alias in owned.items():
+                    lines.append(f"· {alias}  ←  {tgt}")
+                yield event.plain_result("\n".join(lines))
+                return
+
+            first = clean[0].lower()
+            if first in ("help", "帮助", "?"):
+                yield event.plain_result(ALIAS_HELP_TEXT)
+                return
+            if first in clear_kw:
+                if owner in self._aliases:
+                    del self._aliases[owner]
+                    await self._save_aliases()
+                    yield event.plain_result("已清除你设置的全部名片")
+                else:
+                    yield event.plain_result("你还没有设置任何名片")
+                return
+
+            yield event.plain_result(
+                "请通过 @ 指定目标成员\n"
+                "例：/alias @成员 老王\n\n" + ALIAS_HELP_TEXT
+            )
             return
 
-        first = tokens[0].lower()
-        if first in ("help", "帮助", "?"):
-            yield event.plain_result(ALIAS_HELP_TEXT)
-            return
-        if first in ("unset", "remove", "del", "delete", "clear", "移除", "删除", "清除"):
-            if uid in self._aliases:
-                del self._aliases[uid]
-                await self._save_aliases()
-                yield event.plain_result("已清除你的名片")
-            else:
-                yield event.plain_result("你还没有设置名片")
+        # 处理 /alias @X unset / @X @Y unset
+        if clean and clean[0].lower() in unset_kw:
+            owned = self._aliases.get(owner) or {}
+            removed, missing = [], []
+            for tgt in at_targets:
+                if tgt in owned:
+                    removed.append(f"{owned[tgt]}（{tgt}）")
+                    del owned[tgt]
+                else:
+                    missing.append(tgt)
+            if owned:
+                self._aliases[owner] = owned
+            elif owner in self._aliases:
+                del self._aliases[owner]
+            await self._save_aliases()
+            parts = []
+            if removed:
+                parts.append("已移除名片：" + "、".join(removed))
+            if missing:
+                parts.append("尚未设置：" + "、".join(missing))
+            yield event.plain_result("\n".join(parts) or "无变更")
             return
 
-        new_alias = " ".join(tokens).strip()
+        # /alias @X  （仅 @，没有别名文本）—— 查看
+        if not clean:
+            owned = self._aliases.get(owner) or {}
+            lines = []
+            for tgt in at_targets:
+                if tgt in owned:
+                    lines.append(f"· {tgt} → {owned[tgt]}")
+                else:
+                    lines.append(f"· {tgt} 尚未设置名片")
+            yield event.plain_result("\n".join(lines))
+            return
+
+        # /alias @X 某某 —— 设置
+        if len(at_targets) > 1:
+            yield event.plain_result("一次只能为一位成员设置名片")
+            return
+        new_alias = " ".join(clean).strip()
         if not new_alias:
             yield event.plain_result("别名不能为空")
             return
@@ -302,9 +385,12 @@ class TimePlugin(Star):
             yield event.plain_result(f"别名过长（最多 {ALIAS_MAX_LEN} 字符）")
             return
 
-        self._aliases[uid] = new_alias
+        target = at_targets[0]
+        self._aliases.setdefault(owner, {})[target] = new_alias
         await self._save_aliases()
-        yield event.plain_result(f"已设置你的名片为：{new_alias}")
+        yield event.plain_result(
+            f"已将 {target} 的名片设置为：{new_alias}\n（仅你自己可见）"
+        )
 
     @filter.command("help", alias={"帮助"})
     async def help_cmd(self, event: AstrMessageEvent):
@@ -338,6 +424,7 @@ class TimePlugin(Star):
         event: AstrMessageEvent,
         entries: list[tuple[str, dict, datetime]],
         header: str,
+        viewer: str | None = None,
     ) -> list:
         platform = event.get_platform_name()
         show_avatar = platform in QQ_PLATFORMS
@@ -349,7 +436,7 @@ class TimePlugin(Star):
             avatar_shown = show_avatar and uid.isdigit()
             if avatar_shown:
                 chain.append(Comp.Image.fromURL(QQ_AVATAR_URL.format(uid=uid)))
-            name = self._display_name(uid, info)
+            name = self._display_name(uid, info, viewer=viewer)
             tz_label = info.get("tz", "?")
             if tz_label.upper().startswith("UTC"):
                 tz_display = tz_label
@@ -391,8 +478,12 @@ class TimePlugin(Star):
             yield event.plain_result("本群登记数据异常，请重新登记")
             return
 
+        viewer = str(event.get_sender_id())
         chain = self._render_entries(
-            event, entries, f"本群 {len(entries)} 位成员当前时间"
+            event,
+            entries,
+            f"本群 {len(entries)} 位成员当前时间",
+            viewer=viewer,
         )
         yield event.chain_result(chain)
 
@@ -419,12 +510,13 @@ class TimePlugin(Star):
             yield event.plain_result("被查询成员的登记数据异常，请重新登记")
             return
 
+        viewer = str(event.get_sender_id())
         if len(entries) == 1:
             uid0, info0, _ = entries[0]
-            header = f"{self._display_name(uid0, info0)} 的当前时间"
+            header = f"{self._display_name(uid0, info0, viewer=viewer)} 的当前时间"
         else:
             header = f"{len(entries)} 位成员的当前时间"
-        chain = self._render_entries(event, entries, header)
+        chain = self._render_entries(event, entries, header, viewer=viewer)
         if missing:
             miss_names = "、".join(missing)
             chain.append(
@@ -457,7 +549,7 @@ class TimePlugin(Star):
         gkey = str(group_id)
         self._data.setdefault(gkey, {})[uid] = {"tz": canonical, "name": name}
         await self._save()
-        display_name = self._display_name(uid, {"name": name})
+        display_name = self._display_name(uid, {"name": name}, viewer=uid)
         msg = f"已登记 {display_name} 的时区为 {canonical}"
         if canonical.upper().startswith("UTC"):
             msg += "\n提示：固定 UTC 偏移不会随夏令时自动切换，若需要自动切换请使用地区时区（如 America/New_York）"
@@ -488,9 +580,10 @@ class TimePlugin(Star):
         if not users:
             yield event.plain_result("本群暂无登记")
             return
+        viewer = str(event.get_sender_id())
         lines = [f"本群已登记 {len(users)} 人", DIVIDER]
         for uid, info in users.items():
-            lines.append(f"· {self._display_name(uid, info)}")
+            lines.append(f"· {self._display_name(uid, info, viewer=viewer)}")
             lines.append(f"  {info.get('tz')}  ·  {uid}")
         yield event.plain_result("\n".join(lines))
 
@@ -520,7 +613,9 @@ class TimePlugin(Star):
             target = rest[1]
             if target in self._data.get(gkey, {}):
                 target_info = self._data[gkey][target]
-                target_name = self._display_name(target, target_info)
+                target_name = self._display_name(
+                    target, target_info, viewer=str(event.get_sender_id())
+                )
                 del self._data[gkey][target]
                 if not self._data[gkey]:
                     del self._data[gkey]
