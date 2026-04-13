@@ -127,3 +127,24 @@ def test_alias_set_uses_message_chain_text_after_at():
         assert "已将 u2 的名片设置为：乌啪叽" in result[0]
 
     asyncio.run(_run())
+
+
+def test_alias_set_keeps_command_and_alias_separated_across_at():
+    async def _run():
+        async def fake_get(key, default):
+            return default
+
+        async def fake_put(key, value):
+            return None
+
+        storage = StorageService(fake_get, fake_put)
+        handler = AliasCommandHandler(storage)
+
+        evt = FakeEvent(
+            '/alias @def f(): print("反重力裙"); f(); f()  1',
+            messages=[Plain("/alias"), At("u2"), Plain("  1")],
+        )
+        result = await _collect(handler.handle(evt))
+        assert "已将 u2 的名片设置为：1" in result[0]
+
+    asyncio.run(_run())

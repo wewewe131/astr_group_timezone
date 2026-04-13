@@ -54,6 +54,7 @@ def extract_text_without_mentions(event: Any) -> str:
     for comp in chain:
         is_at = comp.__class__.__name__ == "At" or hasattr(comp, "qq")
         if is_at:
+            parts.append(" ")
             continue
         text = getattr(comp, "text", None)
         if text is None:
