@@ -1,0 +1,103 @@
+﻿import asyncio
+
+from handlers.alias_handler import AliasCommandHandler
+from services.storage_service import StorageService
+
+
+class At:
+    def __init__(self, qq):
+        self.qq = qq
+
+
+class MsgObj:
+    def __init__(self, self_id=""):
+        self.self_id = self_id
+
+
+class FakeEvent:
+    def __init__(
+        self,
+        message_str,
+        messages=None,
+        sender_id="1000",
+        sender_name="tester",
+    ):
+        self.message_str = message_str
+        self._messages = messages or []
+        self._sender_id = sender_id
+        self._sender_name = sender_name
+        self.message_obj = MsgObj()
+
+    def get_messages(self):
+        return self._messages
+
+    def get_sender_id(self):
+        return self._sender_id
+
+    def get_sender_name(self):
+        return self._sender_name
+
+    def plain_result(self, text):
+        return text
+
+
+async def _collect(async_gen):
+    return [item async for item in async_gen]
+
+
+def test_alias_set_and_view():
+    async def _run():
+        async def fake_get(key, default):
+            return default
+
+        async def fake_put(key, value):
+            return None
+
+        storage = StorageService(fake_get, fake_put)
+        handler = AliasCommandHandler(storage)
+
+        evt_set = FakeEvent("/alias @u2 老王", messages=[At("u2")])
+        set_result = await _collect(handler.handle(evt_set))
+        assert "已将 u2 的名片设置为：老王" in set_result[0]
+
+        evt_view = FakeEvent("/alias @u2", messages=[At("u2")])
+        view_result = await _collect(handler.handle(evt_view))
+        assert "u2 → 老王" in view_result[0]
+
+    asyncio.run(_run())
+
+
+def test_alias_reject_multi_target_set():
+    async def _run():
+        async def fake_get(key, default):
+            return default
+
+        async def fake_put(key, value):
+            return None
+
+        storage = StorageService(fake_get, fake_put)
+        handler = AliasCommandHandler(storage)
+
+        evt = FakeEvent("/alias @u2 @u3 张三", messages=[At("u2"), At("u3")])
+        result = await _collect(handler.handle(evt))
+        assert result == ["一次只能为一位成员设置名片"]
+
+    asyncio.run(_run())
+
+
+def test_alias_clear_without_data():
+    async def _run():
+        async def fake_get(key, default):
+            return default
+
+        async def fake_put(key, value):
+            return None
+
+        storage = StorageService(fake_get, fake_put)
+        handler = AliasCommandHandler(storage)
+
+        evt = FakeEvent("/alias clear")
+        result = await _collect(handler.handle(evt))
+        assert result == ["你还没有设置任何名片"]
+
+    asyncio.run(_run())
