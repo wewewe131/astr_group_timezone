@@ -11,6 +11,16 @@ class FakeRenderService:
         return [f"{header}:{len(entries)}"]
 
 
+class FakeBot:
+    def __init__(self, members=None):
+        self._members = members or []
+
+    async def call_action(self, action, **kwargs):
+        if action == "get_group_member_list":
+            return self._members
+        raise AssertionError(f"unexpected action: {action}")
+
+
 class At:
     def __init__(self, qq):
         self.qq = qq
@@ -37,6 +47,8 @@ class FakeEvent:
         messages=None,
         group_members=None,
         sender_card=None,
+        group_obj=None,
+        bot=None,
     ):
         self.message_str = message_str
         self._group_id = group_id
@@ -46,6 +58,8 @@ class FakeEvent:
         self._platform = platform
         self._messages = messages or []
         self._group_members = group_members or {}
+        self._group_obj = group_obj
+        self.bot = bot
         self.message_obj = MsgObj(
             sender={
                 "card": sender_card or "",
@@ -72,6 +86,8 @@ class FakeEvent:
         return self._admin
 
     async def get_group(self, group_id=None, **kwargs):
+        if self._group_obj is not None:
+            return self._group_obj
         members = []
         for uid, member in self._group_members.items():
             if isinstance(member, dict):
@@ -185,6 +201,45 @@ def test_time_does_not_fallback_to_username_when_card_is_blank(tmp_path):
         list_result = await _collect(handler.handle(list_evt))
         assert "u1" in list_result[0]
         assert "用户名" not in list_result[0]
+
+    asyncio.run(_run())
+
+
+def test_time_list_uses_raw_aiocqhttp_group_cards_when_get_group_only_has_nickname(tmp_path):
+    async def _run():
+        storage = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
+        await storage.initialize()
+        await storage.upsert_timezone("g1", "u1", "Asia/Shanghai")
+        await storage.upsert_timezone("g1", "u2", "Europe/London")
+        handler = TimeCommandHandler(storage, TimeService(), FakeRenderService())
+
+        group_obj = SimpleNamespace(
+            members=[
+                SimpleNamespace(user_id="u1", nickname="发送者昵称"),
+                SimpleNamespace(user_id="u2", nickname="目标昵称"),
+            ]
+        )
+        bot = FakeBot(
+            members=[
+                {"user_id": "u1", "card": "发送者群名片", "nickname": "发送者昵称"},
+                {"user_id": "u2", "card": "目标群名片", "nickname": "目标昵称"},
+            ]
+        )
+        event = FakeEvent(
+            "/time list",
+            group_id="g1",
+            sender_id="u1",
+            sender_name="发送者昵称",
+            sender_card="发送者群名片",
+            group_obj=group_obj,
+            bot=bot,
+        )
+        result = await _collect(handler.handle(event))
+
+        assert "发送者群名片" in result[0]
+        assert "目标群名片" in result[0]
+        assert "发送者昵称" not in result[0]
+        assert "目标昵称" not in result[0]
 
     asyncio.run(_run())
 

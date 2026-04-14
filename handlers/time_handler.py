@@ -102,6 +102,46 @@ class TimeCommandHandler:
 
         return []
 
+    async def _live_group_members(self, event: Any, group_id: str) -> list[Any]:
+        platform = ""
+        try:
+            platform = str(event.get_platform_name() or "")
+        except Exception:
+            platform = ""
+
+        # AstrBot's aiocqhttp get_group() currently flattens members into
+        # MessageMember(user_id, nickname), which loses the original `card`
+        # field and prefers nickname over group card. Query the raw member list
+        # first so we can still prefer card when building display names.
+        if platform == "aiocqhttp":
+            bot = getattr(event, "bot", None)
+            call_action = getattr(bot, "call_action", None)
+            if callable(call_action):
+                raw_group_id: str | int = group_id
+                if str(group_id).isdigit():
+                    raw_group_id = int(group_id)
+                try:
+                    members = await call_action(
+                        "get_group_member_list",
+                        group_id=raw_group_id,
+                    )
+                    if members is not None:
+                        return list(members)
+                except Exception:
+                    pass
+
+        if not hasattr(event, "get_group"):
+            return []
+
+        try:
+            group = event.get_group(group_id)
+            if inspect.isawaitable(group):
+                group = await group
+        except Exception:
+            return []
+
+        return await self._group_members(group)
+
     async def _load_users(
         self,
         event: Any,
@@ -117,19 +157,9 @@ class TimeCommandHandler:
             viewer=viewer,
             target_uids=target_uids,
         )
-        if not hasattr(event, "get_group"):
-            return str(group_id), viewer, users, {}
-
-        try:
-            group = event.get_group(group_id)
-            if inspect.isawaitable(group):
-                group = await group
-        except Exception:
-            return str(group_id), viewer, users, {}
-
         wanted = {str(uid) for uid in (target_uids or list(users))}
         names: dict[str, str] = {}
-        for member in await self._group_members(group):
+        for member in await self._live_group_members(event, str(group_id)):
             uid = str(self._member_field(member, "user_id") or "")
             if not uid or uid not in wanted:
                 continue
