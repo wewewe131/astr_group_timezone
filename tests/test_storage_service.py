@@ -16,9 +16,16 @@ def test_storage_initializes_tables(tmp_path):
                     "SELECT name FROM sqlite_master WHERE type = 'table'"
                 ).fetchall()
             }
+            timezone_columns = [
+                row[1]
+                for row in conn.execute(
+                    f"PRAGMA table_info({TIMEZONES_TABLE})"
+                ).fetchall()
+            ]
 
         assert TIMEZONES_TABLE in tables
         assert ALIASES_TABLE in tables
+        assert timezone_columns == ["group_id", "user_id", "tz"]
 
     asyncio.run(_run())
 
@@ -27,14 +34,12 @@ def test_timezone_query_can_join_alias(tmp_path):
     async def _run():
         svc = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
         await svc.initialize()
-        await svc.upsert_timezone("g1", "u1", "Asia/Shanghai", "Alice")
+        await svc.upsert_timezone("g1", "u1", "Asia/Shanghai")
         await svc.set_alias("viewer1", "u1", "老王")
 
         users = await svc.list_timezones("g1", viewer="viewer1")
 
-        assert users == {
-            "u1": {"tz": "Asia/Shanghai", "name": "Alice", "alias": "老王"}
-        }
+        assert users == {"u1": {"tz": "Asia/Shanghai", "alias": "老王"}}
 
     asyncio.run(_run())
 
@@ -44,23 +49,54 @@ def test_storage_crud_methods(tmp_path):
         svc = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
         await svc.initialize()
 
-        await svc.upsert_timezone("g1", "u1", "UTC+08:00", "Alice")
-        await svc.upsert_timezone("g1", "u2", "Europe/London", "Bob")
+        await svc.upsert_timezone("g1", "u1", "UTC+08:00")
+        await svc.upsert_timezone("g1", "u2", "Europe/London")
         await svc.set_alias("viewer1", "u1", "A")
         await svc.set_alias("viewer1", "u2", "B")
 
         assert await svc.get_timezone("g1", "u1", viewer="viewer1") == {
             "tz": "UTC+08:00",
-            "name": "Alice",
             "alias": "A",
         }
         assert await svc.list_aliases("viewer1", ["u2"]) == {"u2": "B"}
         assert await svc.delete_aliases("viewer1", ["u1", "u3"]) == {"u1": "A"}
-        assert await svc.delete_timezone("g1", "u2") == {
-            "tz": "Europe/London",
-            "name": "Bob",
-        }
+        assert await svc.delete_timezone("g1", "u2") == {"tz": "Europe/London"}
         assert await svc.clear_aliases("viewer1") == 1
         assert await svc.clear_group_timezones("g1") == 1
+
+    asyncio.run(_run())
+
+
+def test_storage_migrates_legacy_timezone_name_column(tmp_path):
+    db_path = tmp_path / "data_v4.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            f"""
+            CREATE TABLE {TIMEZONES_TABLE} (
+                group_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                tz TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (group_id, user_id)
+            );
+            INSERT INTO {TIMEZONES_TABLE} (group_id, user_id, tz, name)
+            VALUES ('g1', 'u1', 'Asia/Shanghai', 'Alice');
+            """
+        )
+
+    async def _run():
+        svc = StorageService(sqlite_db_path=db_path)
+        await svc.initialize()
+
+        with sqlite3.connect(db_path) as conn:
+            timezone_columns = [
+                row[1]
+                for row in conn.execute(
+                    f"PRAGMA table_info({TIMEZONES_TABLE})"
+                ).fetchall()
+            ]
+
+        assert timezone_columns == ["group_id", "user_id", "tz"]
+        assert await svc.get_timezone("g1", "u1") == {"tz": "Asia/Shanghai"}
 
     asyncio.run(_run())

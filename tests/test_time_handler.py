@@ -1,4 +1,5 @@
-﻿import asyncio
+import asyncio
+from types import SimpleNamespace
 
 from handlers.time_handler import TimeCommandHandler
 from services.storage_service import StorageService
@@ -25,6 +26,7 @@ class FakeEvent:
         admin=False,
         platform="aiocqhttp",
         messages=None,
+        group_members=None,
     ):
         self.message_str = message_str
         self._group_id = group_id
@@ -33,6 +35,7 @@ class FakeEvent:
         self._admin = admin
         self._platform = platform
         self._messages = messages or []
+        self._group_members = group_members or {}
         self.message_obj = MsgObj()
 
     def get_group_id(self):
@@ -52,6 +55,13 @@ class FakeEvent:
 
     def is_admin(self):
         return self._admin
+
+    async def get_group(self, group_id=None, **kwargs):
+        members = [
+            SimpleNamespace(user_id=uid, nickname=name)
+            for uid, name in self._group_members.items()
+        ]
+        return SimpleNamespace(members=members)
 
     def plain_result(self, text):
         return text
@@ -97,12 +107,46 @@ def test_time_set_and_list_routes(tmp_path):
         await storage.initialize()
         handler = TimeCommandHandler(storage, TimeService(), FakeRenderService())
 
-        set_evt = FakeEvent("/time set +8", group_id="g1", sender_id="u1", sender_name="U1")
+        set_evt = FakeEvent(
+            "/time set +8",
+            group_id="g1",
+            sender_id="u1",
+            sender_name="旧昵称",
+            group_members={"u1": "当前群名片"},
+        )
         set_result = await _collect(handler.handle(set_evt))
-        assert "已登记 U1 的时区为 UTC+08:00" in set_result[0]
+        assert "已登记 当前群名片 的时区为 UTC+08:00" in set_result[0]
 
-        list_evt = FakeEvent("/time list", group_id="g1", sender_id="u1")
+        list_evt = FakeEvent(
+            "/time list",
+            group_id="g1",
+            sender_id="u1",
+            group_members={"u1": "当前群名片"},
+        )
         list_result = await _collect(handler.handle(list_evt))
         assert "本群已登记 1 人" in list_result[0]
+        assert "当前群名片" in list_result[0]
+
+    asyncio.run(_run())
+
+
+def test_time_list_prefers_alias_over_group_card(tmp_path):
+    async def _run():
+        storage = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
+        await storage.initialize()
+        await storage.upsert_timezone("g1", "u1", "Asia/Shanghai")
+        await storage.set_alias("viewer1", "u1", "老王")
+        handler = TimeCommandHandler(storage, TimeService(), FakeRenderService())
+
+        event = FakeEvent(
+            "/time list",
+            group_id="g1",
+            sender_id="viewer1",
+            group_members={"u1": "当前群名片"},
+        )
+        result = await _collect(handler.handle(event))
+
+        assert "老王" in result[0]
+        assert "当前群名片" not in result[0]
 
     asyncio.run(_run())

@@ -49,14 +49,13 @@ class StorageService:
         users = await self.list_timezones(group_id, viewer=viewer, target_uids=[user_id])
         return users.get(str(user_id))
 
-    async def upsert_timezone(self, group_id: str, user_id: str, tz: str, name: str) -> None:
+    async def upsert_timezone(self, group_id: str, user_id: str, tz: str) -> None:
         async with self._lock:
             await asyncio.to_thread(
                 self._upsert_timezone,
                 str(group_id),
                 str(user_id),
                 str(tz),
-                str(name),
             )
 
     async def delete_timezone(self, group_id: str, user_id: str) -> UserInfo | None:
@@ -127,24 +126,55 @@ class StorageService:
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
-            conn.executescript(
+            conn.execute(
                 f"""
-                CREATE TABLE IF NOT EXISTS {TIMEZONES_TABLE} (
-                    group_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    tz TEXT NOT NULL,
-                    name TEXT NOT NULL DEFAULT '',
-                    PRIMARY KEY (group_id, user_id)
-                );
-
                 CREATE TABLE IF NOT EXISTS {ALIASES_TABLE} (
                     owner_id TEXT NOT NULL,
                     target_id TEXT NOT NULL,
                     alias TEXT NOT NULL,
                     PRIMARY KEY (owner_id, target_id)
-                );
+                )
                 """
             )
+
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (TIMEZONES_TABLE,),
+            ).fetchall()
+            if not rows:
+                conn.execute(
+                    f"""
+                    CREATE TABLE {TIMEZONES_TABLE} (
+                        group_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        tz TEXT NOT NULL,
+                        PRIMARY KEY (group_id, user_id)
+                    )
+                    """
+                )
+                return
+
+            columns = [
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({TIMEZONES_TABLE})").fetchall()
+            ]
+            if "name" in columns:
+                old_table = f"{TIMEZONES_TABLE}__old"
+                conn.executescript(
+                    f"""
+                    ALTER TABLE {TIMEZONES_TABLE} RENAME TO {old_table};
+                    CREATE TABLE {TIMEZONES_TABLE} (
+                        group_id TEXT NOT NULL,
+                        user_id TEXT NOT NULL,
+                        tz TEXT NOT NULL,
+                        PRIMARY KEY (group_id, user_id)
+                    );
+                    INSERT INTO {TIMEZONES_TABLE} (group_id, user_id, tz)
+                    SELECT group_id, user_id, tz
+                    FROM {old_table};
+                    DROP TABLE {old_table};
+                    """
+                )
 
     def _list_timezones(
         self,
@@ -154,7 +184,7 @@ class StorageService:
     ) -> dict[str, UserInfo]:
         params: list[Any] = [viewer, group_id]
         sql = f"""
-            SELECT t.user_id, t.tz, t.name, a.alias
+            SELECT t.user_id, t.tz, a.alias
             FROM {TIMEZONES_TABLE} AS t
             LEFT JOIN {ALIASES_TABLE} AS a
               ON a.owner_id = ?
@@ -171,30 +201,30 @@ class StorageService:
             rows = conn.execute(sql, params).fetchall()
 
         result: dict[str, UserInfo] = {}
-        for user_id, tz, name, alias in rows:
-            info: UserInfo = {"tz": str(tz), "name": str(name or "")}
+        for user_id, tz, alias in rows:
+            info: UserInfo = {"tz": str(tz)}
             if alias:
                 info["alias"] = str(alias)
             result[str(user_id)] = info
         return result
 
-    def _upsert_timezone(self, group_id: str, user_id: str, tz: str, name: str) -> None:
+    def _upsert_timezone(self, group_id: str, user_id: str, tz: str) -> None:
         with self._connect() as conn:
             conn.execute(
                 f"""
-                INSERT INTO {TIMEZONES_TABLE} (group_id, user_id, tz, name)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO {TIMEZONES_TABLE} (group_id, user_id, tz)
+                VALUES (?, ?, ?)
                 ON CONFLICT(group_id, user_id)
-                DO UPDATE SET tz = excluded.tz, name = excluded.name
+                DO UPDATE SET tz = excluded.tz
                 """,
-                (group_id, user_id, tz, name),
+                (group_id, user_id, tz),
             )
 
     def _delete_timezone(self, group_id: str, user_id: str) -> UserInfo | None:
         with self._connect() as conn:
             row = conn.execute(
                 f"""
-                SELECT tz, name
+                SELECT tz
                 FROM {TIMEZONES_TABLE}
                 WHERE group_id = ? AND user_id = ?
                 """,
@@ -207,7 +237,7 @@ class StorageService:
                 (group_id, user_id),
             )
 
-        return {"tz": str(row[0]), "name": str(row[1] or "")}
+        return {"tz": str(row[0])}
 
     def _clear_group_timezones(self, group_id: str) -> int:
         with self._connect() as conn:
