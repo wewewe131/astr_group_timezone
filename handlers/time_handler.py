@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-from pprint import pformat
 from typing import Any
 
 try:
@@ -51,7 +50,11 @@ class TimeCommandHandler:
     def _sender_group_name(self, event: Any) -> str:
         message_obj = getattr(event, "message_obj", None)
         raw_message = getattr(message_obj, "raw_message", None)
-        sender = getattr(raw_message, "sender", None) or getattr(message_obj, "sender", None)
+        sender = (
+            raw_message.get("sender")
+            if isinstance(raw_message, dict)
+            else getattr(raw_message, "sender", None)
+        ) or getattr(message_obj, "sender", None)
         if isinstance(sender, dict):
             return str(sender.get("card") or sender.get("nickname") or "").strip()
         return str(
@@ -134,19 +137,6 @@ class TimeCommandHandler:
             )
         )
 
-    def _debug_value(self, value: Any):
-        if isinstance(value, dict):
-            return {k: self._debug_value(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple, set)):
-            return [self._debug_value(v) for v in value]
-        if hasattr(value, "__dict__"):
-            return {
-                k: self._debug_value(v)
-                for k, v in vars(value).items()
-                if not k.startswith("_")
-            }
-        return value
-
     async def handle(self, event: Any):
         tokens = strip_cmd_prefix(event.message_str or "")
         at_targets = extract_at_targets(event)
@@ -170,9 +160,6 @@ class TimeCommandHandler:
         elif action in TIME_LIST_ALIASES:
             async for r in self._list_tz(event):
                 yield r
-        elif action == "show":
-            raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
-            yield event.plain_result(pformat(self._debug_value(raw_message), sort_dicts=False))
         elif action in HELP_ALIASES:
             yield event.plain_result(HELP_TEXT)
         elif action == "admin":
