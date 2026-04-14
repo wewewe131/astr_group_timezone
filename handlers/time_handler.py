@@ -47,6 +47,18 @@ class TimeCommandHandler:
     def _display_name(self, uid: str, info: dict | None = None, viewer: str | None = None) -> str:
         return self.time_service.display_name(uid, info=info)
 
+    def _sender_group_name(self, event: Any) -> str:
+        message_obj = getattr(event, "message_obj", None)
+        raw_message = getattr(message_obj, "raw_message", None)
+        sender = getattr(raw_message, "sender", None) or getattr(message_obj, "sender", None)
+        if isinstance(sender, dict):
+            return str(sender.get("card") or sender.get("nickname") or "").strip()
+        return str(
+            getattr(sender, "card", "")
+            or getattr(sender, "nickname", "")
+            or ""
+        ).strip()
+
     async def _load_users(
         self,
         event: Any,
@@ -86,6 +98,10 @@ class TimeCommandHandler:
                 ).strip()
             )
         }
+        sender_uid = str(event.get_sender_id())
+        sender_name = self._sender_group_name(event)
+        if sender_name and sender_uid in wanted:
+            names[sender_uid] = sender_name
         users = {
             uid: ({**info, "name": names[uid]} if uid in names else info)
             for uid, info in users.items()
@@ -221,7 +237,7 @@ class TimeCommandHandler:
         info = self._info(
             uid,
             aliases=await self.storage.list_aliases(uid, [uid]),
-            names=names,
+            names={uid: self._sender_group_name(event) or names.get(uid, "")},
             fallback=event.get_sender_name(),
         )
 

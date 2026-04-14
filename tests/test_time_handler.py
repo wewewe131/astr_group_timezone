@@ -12,8 +12,9 @@ class FakeRenderService:
 
 
 class MsgObj:
-    def __init__(self, self_id=""):
+    def __init__(self, self_id="", sender=None):
         self.self_id = self_id
+        self.raw_message = SimpleNamespace(sender=sender or {})
 
 
 class FakeEvent:
@@ -27,6 +28,7 @@ class FakeEvent:
         platform="aiocqhttp",
         messages=None,
         group_members=None,
+        sender_card=None,
     ):
         self.message_str = message_str
         self._group_id = group_id
@@ -36,7 +38,12 @@ class FakeEvent:
         self._platform = platform
         self._messages = messages or []
         self._group_members = group_members or {}
-        self.message_obj = MsgObj()
+        self.message_obj = MsgObj(
+            sender={
+                "card": sender_card or "",
+                "nickname": sender_name,
+            }
+        )
 
     def get_group_id(self):
         return self._group_id
@@ -115,8 +122,9 @@ def test_time_set_and_list_routes(tmp_path):
             "/time set +8",
             group_id="g1",
             sender_id="u1",
-            sender_name="旧昵称",
-            group_members={"u1": ("当前群名片", "用户名")},
+            sender_name="用户名",
+            sender_card="当前群名片",
+            group_members={"u1": ("", "用户名")},
         )
         set_result = await _collect(handler.handle(set_evt))
         assert "已登记 当前群名片 的时区为 UTC+08:00" in set_result[0]
@@ -125,7 +133,9 @@ def test_time_set_and_list_routes(tmp_path):
             "/time list",
             group_id="g1",
             sender_id="u1",
-            group_members={"u1": ("当前群名片", "用户名")},
+            sender_name="用户名",
+            sender_card="当前群名片",
+            group_members={"u1": ("", "用户名")},
         )
         list_result = await _collect(handler.handle(list_evt))
         assert "本群已登记 1 人" in list_result[0]
