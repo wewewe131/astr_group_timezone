@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import inspect
 from typing import Any
@@ -47,48 +47,69 @@ class TimeCommandHandler:
     def _display_name(self, uid: str, info: dict | None = None, viewer: str | None = None) -> str:
         return self.time_service.display_name(uid, info=info)
 
-    async def _get_group_member_names(
+    async def _load_users(
         self,
         event: Any,
         target_uids: list[str] | None = None,
-    ) -> dict[str, str]:
+    ) -> tuple[str | None, str, dict[str, dict], dict[str, str]]:
         group_id = event.get_group_id()
-        if not group_id or not hasattr(event, "get_group"):
-            return {}
+        viewer = str(event.get_sender_id())
+        if not group_id:
+            return None, viewer, {}, {}
+
+        users = await self.storage.list_timezones(
+            str(group_id),
+            viewer=viewer,
+            target_uids=target_uids,
+        )
+        if not hasattr(event, "get_group"):
+            return str(group_id), viewer, users, {}
 
         try:
             group = event.get_group(group_id)
             if inspect.isawaitable(group):
                 group = await group
         except Exception:
-            return {}
+            return str(group_id), viewer, users, {}
 
-        members = getattr(group, "members", None) or []
-        wanted = {str(uid) for uid in target_uids} if target_uids is not None else None
-        names: dict[str, str] = {}
-        for member in members:
-            uid = str(getattr(member, "user_id", "") or "")
-            if not uid:
-                continue
-            if wanted is not None and uid not in wanted:
-                continue
-            name = str(getattr(member, "nickname", "") or "").strip()
-            if name:
-                names[uid] = name
-        return names
+        wanted = {str(uid) for uid in (target_uids or list(users))}
+        names = {
+            uid: name
+            for member in getattr(group, "members", None) or []
+            if (uid := str(getattr(member, "user_id", "") or ""))
+            and uid in wanted
+            and (name := str(getattr(member, "nickname", "") or "").strip())
+        }
+        users = {
+            uid: ({**info, "name": names[uid]} if uid in names else info)
+            for uid, info in users.items()
+        }
+        return str(group_id), viewer, users, names
 
-    def _merge_display_names(
+    def _info(
         self,
-        users: dict[str, dict],
-        member_names: dict[str, str],
-    ) -> dict[str, dict]:
-        merged: dict[str, dict] = {}
-        for uid, info in users.items():
-            info_copy = dict(info)
-            if uid in member_names:
-                info_copy["name"] = member_names[uid]
-            merged[uid] = info_copy
-        return merged
+        uid: str,
+        aliases: dict[str, str] | None = None,
+        names: dict[str, str] | None = None,
+        fallback: str | None = None,
+    ) -> dict[str, str]:
+        info = {"alias": aliases[uid]} if aliases and uid in aliases else {}
+        if names and uid in names:
+            info["name"] = names[uid]
+        elif fallback:
+            info["name"] = str(fallback)
+        return info
+
+    def _render(self, event: Any, entries: list, header: str, viewer: str):
+        return event.chain_result(
+            self.render_service.render_entries(
+                event,
+                entries,
+                header,
+                display_name_fn=self._display_name,
+                viewer=viewer,
+            )
+        )
 
     async def handle(self, event: Any):
         tokens = strip_cmd_prefix(event.message_str or "")
@@ -98,15 +119,12 @@ class TimeCommandHandler:
             async for r in self._show_member_times(event, at_targets):
                 yield r
             return
-
         if not tokens:
             async for r in self._show_group_times(event):
                 yield r
             return
 
-        action = tokens[0].lower()
-        rest = tokens[1:]
-
+        action, rest = tokens[0].lower(), tokens[1:]
         if action in TIME_SET_ALIASES:
             async for r in self._set_tz(event, rest):
                 yield r
@@ -125,58 +143,32 @@ class TimeCommandHandler:
             yield event.plain_result(f"未知子命令：{action}\n\n{HELP_TEXT}")
 
     async def _show_group_times(self, event: Any):
-        group_id = event.get_group_id()
+        group_id, viewer, users, _ = await self._load_users(event)
         if not group_id:
             yield event.plain_result("该指令只能在群组中使用")
             return
-
-        viewer = str(event.get_sender_id())
-        users = await self.storage.list_timezones(str(group_id), viewer=viewer)
         if not users:
             yield event.plain_result(
                 "本群还没有成员登记时区～\n使用 /time set <时区> 登记（如 /time set Asia/Shanghai）"
             )
             return
-        users = self._merge_display_names(
-            users,
-            await self._get_group_member_names(event, list(users)),
-        )
 
         entries, _ = self.time_service.build_entries(users)
         if not entries:
             yield event.plain_result("本群登记数据异常，请重新登记")
             return
-
-        chain = self.render_service.render_entries(
-            event,
-            entries,
-            f"本群 {len(entries)} 位成员当前时间",
-            display_name_fn=self._display_name,
-            viewer=viewer,
-        )
-        yield event.chain_result(chain)
+        yield self._render(event, entries, f"本群 {len(entries)} 位成员当前时间", viewer)
 
     async def _show_member_times(self, event: Any, target_uids: list[str]):
-        group_id = event.get_group_id()
+        group_id, viewer, users, names = await self._load_users(event, target_uids)
         if not group_id:
             yield event.plain_result("该指令只能在群组中使用")
             return
 
-        viewer = str(event.get_sender_id())
-        users = await self.storage.list_timezones(
-            str(group_id),
-            viewer=viewer,
-            target_uids=target_uids,
-        )
-        member_names = await self._get_group_member_names(event, target_uids)
-        users = self._merge_display_names(users, member_names)
         missing = [uid for uid in target_uids if uid not in users]
         present = [uid for uid in target_uids if uid in users]
-
         if not present:
-            yield event.plain_result(
-                "被查询的成员尚未登记时区\n可让对方使用 /time set <时区> 登记"
-            )
+            yield event.plain_result("被查询的成员尚未登记时区\n可让对方使用 /time set <时区> 登记")
             return
 
         entries, _ = self.time_service.build_entries(users, present)
@@ -184,32 +176,19 @@ class TimeCommandHandler:
             yield event.plain_result("被查询成员的登记数据异常，请重新登记")
             return
 
-        if len(entries) == 1:
-            uid0, info0, _ = entries[0]
-            header = f"{self._display_name(uid0, info0, viewer=viewer)} 的当前时间"
-        else:
-            header = f"{len(entries)} 位成员的当前时间"
-        chain = self.render_service.render_entries(
-            event,
-            entries,
-            header,
-            display_name_fn=self._display_name,
-            viewer=viewer,
-        )
+        uid0, info0, _ = entries[0]
+        header = f"{self._display_name(uid0, info0, viewer=viewer)} 的当前时间" if len(entries) == 1 else f"{len(entries)} 位成员的当前时间"
+        chain = self._render(event, entries, header, viewer)
         if missing:
-            aliases = await self.storage.list_aliases(viewer, missing)
-            miss_names = []
-            for uid in missing:
-                info: dict[str, str] = {}
-                if uid in aliases:
-                    info["alias"] = aliases[uid]
-                if uid in member_names:
-                    info["name"] = member_names[uid]
-                miss_names.append(self._display_name(uid, info, viewer=viewer))
             import astrbot.api.message_components as Comp
 
+            aliases = await self.storage.list_aliases(viewer, missing)
+            miss_names = [
+                self._display_name(uid, self._info(uid, aliases, names), viewer=viewer)
+                for uid in missing
+            ]
             chain.append(Comp.Plain(f"{DIVIDER}\n未登记：{'、'.join(miss_names)}"))
-        yield event.chain_result(chain)
+        yield chain
 
     async def _set_tz(self, event: Any, rest: list[str]):
         group_id = event.get_group_id()
@@ -224,29 +203,23 @@ class TimeCommandHandler:
             )
             return
 
-        tz_text = " ".join(rest)
         try:
-            _, canonical = self.time_service.parse_tz(tz_text)
+            _, canonical = self.time_service.parse_tz(" ".join(rest))
         except ValueError as e:
             yield event.plain_result(f"错误：{e}")
             return
 
         uid = str(event.get_sender_id())
-        gkey = str(group_id)
-        await self.storage.upsert_timezone(gkey, uid, canonical)
+        await self.storage.upsert_timezone(str(group_id), uid, canonical)
+        _, _, _, names = await self._load_users(event, [uid])
+        info = self._info(
+            uid,
+            aliases=await self.storage.list_aliases(uid, [uid]),
+            names=names,
+            fallback=event.get_sender_name(),
+        )
 
-        member_names = await self._get_group_member_names(event, [uid])
-        aliases = await self.storage.list_aliases(uid, [uid])
-        info: dict[str, str] = {}
-        if uid in aliases:
-            info["alias"] = aliases[uid]
-        if uid in member_names:
-            info["name"] = member_names[uid]
-        elif event.get_sender_name():
-            info["name"] = str(event.get_sender_name())
-
-        display_name = self._display_name(uid, info, viewer=uid)
-        msg = f"已登记 {display_name} 的时区为 {canonical}"
+        msg = f"已登记 {self._display_name(uid, info, viewer=uid)} 的时区为 {canonical}"
         if canonical.upper().startswith("UTC"):
             msg += "\n提示：固定 UTC 偏移不会随夏令时自动切换，若需要自动切换请使用地区时区（如 America/New_York）"
         yield event.plain_result(msg)
@@ -256,38 +229,30 @@ class TimeCommandHandler:
         if not group_id:
             yield event.plain_result("该指令只能在群组中使用")
             return
-        uid = str(event.get_sender_id())
-        gkey = str(group_id)
-        removed = await self.storage.delete_timezone(gkey, uid)
-        if not removed:
+        if not await self.storage.delete_timezone(str(group_id), str(event.get_sender_id())):
             yield event.plain_result("你还没有登记时区")
             return
         yield event.plain_result("已移除你的时区登记")
 
     async def _list_tz(self, event: Any):
-        group_id = event.get_group_id()
+        group_id, viewer, users, _ = await self._load_users(event)
         if not group_id:
             yield event.plain_result("该指令只能在群组中使用")
             return
-        viewer = str(event.get_sender_id())
-        users = await self.storage.list_timezones(str(group_id), viewer=viewer)
         if not users:
             yield event.plain_result("本群暂无登记")
             return
-        users = self._merge_display_names(
-            users,
-            await self._get_group_member_names(event, list(users)),
-        )
+
         lines = [f"本群已登记 {len(users)} 人", DIVIDER]
         for uid, info in users.items():
-            lines.append(f"· {self._display_name(uid, info, viewer=viewer)}")
-            lines.append(f"  {info.get('tz')}  ·  {uid}")
+            lines.extend([f"· {self._display_name(uid, info, viewer=viewer)}", f"  {info.get('tz')}  ·  {uid}"])
         yield event.plain_result("\n".join(lines))
 
     async def _admin(self, event: Any, rest: list[str]):
         if not event.is_admin():
             yield event.plain_result("该操作仅限管理员")
             return
+
         group_id = event.get_group_id()
         if not group_id:
             yield event.plain_result("该指令只能在群组中使用")
@@ -304,35 +269,21 @@ class TimeCommandHandler:
             return
 
         sub = rest[0].lower()
-        gkey = str(group_id)
-
         if sub in ADMIN_REMOVE_ALIASES and len(rest) >= 2:
             target = rest[1]
-            viewer = str(event.get_sender_id())
-            target_info = await self.storage.get_timezone(
-                gkey,
-                target,
-                viewer=viewer,
-            )
-            if target_info:
-                target_info = self._merge_display_names(
-                    {target: target_info},
-                    await self._get_group_member_names(event, [target]),
-                )[target]
-                target_name = self._display_name(
-                    target,
-                    target_info,
-                    viewer=viewer,
-                )
-                await self.storage.delete_timezone(gkey, target)
-                yield event.plain_result(f"已移除 {target_name}（{target}）的时区登记")
-            else:
+            _, viewer, users, _ = await self._load_users(event, [target])
+            if target not in users:
                 yield event.plain_result(f"{target} 未登记")
+                return
+            await self.storage.delete_timezone(str(group_id), target)
+            yield event.plain_result(
+                f"已移除 {self._display_name(target, users[target], viewer=viewer)}（{target}）的时区登记"
+            )
         elif sub == "clear":
-            removed = await self.storage.clear_group_timezones(gkey)
-            if removed:
-                yield event.plain_result("已清空本群所有时区登记")
-            else:
-                yield event.plain_result("本群暂无登记")
+            yield event.plain_result(
+                "已清空本群所有时区登记"
+                if await self.storage.clear_group_timezones(str(group_id))
+                else "本群暂无登记"
+            )
         else:
             yield event.plain_result("未知的管理员子命令，使用 /time admin 查看用法")

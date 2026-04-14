@@ -65,38 +65,3 @@ def test_storage_crud_methods(tmp_path):
         assert await svc.clear_group_timezones("g1") == 1
 
     asyncio.run(_run())
-
-
-def test_storage_migrates_legacy_timezone_name_column(tmp_path):
-    db_path = tmp_path / "data_v4.db"
-    with sqlite3.connect(db_path) as conn:
-        conn.executescript(
-            f"""
-            CREATE TABLE {TIMEZONES_TABLE} (
-                group_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                tz TEXT NOT NULL,
-                name TEXT NOT NULL DEFAULT '',
-                PRIMARY KEY (group_id, user_id)
-            );
-            INSERT INTO {TIMEZONES_TABLE} (group_id, user_id, tz, name)
-            VALUES ('g1', 'u1', 'Asia/Shanghai', 'Alice');
-            """
-        )
-
-    async def _run():
-        svc = StorageService(sqlite_db_path=db_path)
-        await svc.initialize()
-
-        with sqlite3.connect(db_path) as conn:
-            timezone_columns = [
-                row[1]
-                for row in conn.execute(
-                    f"PRAGMA table_info({TIMEZONES_TABLE})"
-                ).fetchall()
-            ]
-
-        assert timezone_columns == ["group_id", "user_id", "tz"]
-        assert await svc.get_timezone("g1", "u1") == {"tz": "Asia/Shanghai"}
-
-    asyncio.run(_run())

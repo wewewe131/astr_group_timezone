@@ -128,6 +128,16 @@ class StorageService:
         with self._connect() as conn:
             conn.execute(
                 f"""
+                CREATE TABLE IF NOT EXISTS {TIMEZONES_TABLE} (
+                    group_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    tz TEXT NOT NULL,
+                    PRIMARY KEY (group_id, user_id)
+                )
+                """
+            )
+            conn.execute(
+                f"""
                 CREATE TABLE IF NOT EXISTS {ALIASES_TABLE} (
                     owner_id TEXT NOT NULL,
                     target_id TEXT NOT NULL,
@@ -136,45 +146,6 @@ class StorageService:
                 )
                 """
             )
-
-            rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-                (TIMEZONES_TABLE,),
-            ).fetchall()
-            if not rows:
-                conn.execute(
-                    f"""
-                    CREATE TABLE {TIMEZONES_TABLE} (
-                        group_id TEXT NOT NULL,
-                        user_id TEXT NOT NULL,
-                        tz TEXT NOT NULL,
-                        PRIMARY KEY (group_id, user_id)
-                    )
-                    """
-                )
-                return
-
-            columns = [
-                str(row[1])
-                for row in conn.execute(f"PRAGMA table_info({TIMEZONES_TABLE})").fetchall()
-            ]
-            if "name" in columns:
-                old_table = f"{TIMEZONES_TABLE}__old"
-                conn.executescript(
-                    f"""
-                    ALTER TABLE {TIMEZONES_TABLE} RENAME TO {old_table};
-                    CREATE TABLE {TIMEZONES_TABLE} (
-                        group_id TEXT NOT NULL,
-                        user_id TEXT NOT NULL,
-                        tz TEXT NOT NULL,
-                        PRIMARY KEY (group_id, user_id)
-                    );
-                    INSERT INTO {TIMEZONES_TABLE} (group_id, user_id, tz)
-                    SELECT group_id, user_id, tz
-                    FROM {old_table};
-                    DROP TABLE {old_table};
-                    """
-                )
 
     def _list_timezones(
         self,
