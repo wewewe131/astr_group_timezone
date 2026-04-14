@@ -26,6 +26,8 @@ HELP_TEXT = (
     "  移除自己的时区登记\n"
     "/time list\n"
     "  列出本群所有登记\n"
+    "/time show\n"
+    "  输出当前事件的 raw_message 调试信息\n"
     "/time help\n"
     "  显示本帮助\n"
     "/alias @成员 <别名>\n"

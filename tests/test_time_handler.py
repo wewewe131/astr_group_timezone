@@ -99,6 +99,28 @@ def test_time_route_unknown_subcommand(tmp_path):
     asyncio.run(_run())
 
 
+def test_time_show_prints_raw_message(tmp_path):
+    async def _run():
+        storage = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
+        await storage.initialize()
+        handler = TimeCommandHandler(storage, TimeService(), FakeRenderService())
+
+        event = FakeEvent(
+            "/time show",
+            group_id="g1",
+            sender_id="u1",
+            sender_name="用户名",
+            sender_card="当前群名片",
+        )
+        result = await _collect(handler.handle(event))
+
+        assert "'sender'" in result[0]
+        assert "'card': '当前群名片'" in result[0]
+        assert "'nickname': '用户名'" in result[0]
+
+    asyncio.run(_run())
+
+
 def test_time_requires_group_for_default_show(tmp_path):
     async def _run():
         storage = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
