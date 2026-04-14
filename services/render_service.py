@@ -17,7 +17,7 @@ class RenderService:
         event: Any,
         entries: list[Entry],
         header: str,
-        display_name_fn: Callable[[str, dict | None, str | None], str],
+        display_name_fn: Callable[[str, dict | None], str],
         viewer: str | None = None,
     ) -> list[Any]:
         import astrbot.api.message_components as Comp
@@ -32,7 +32,7 @@ class RenderService:
             avatar_shown = show_avatar and uid.isdigit()
             if avatar_shown:
                 chain.append(Comp.Image.fromURL(QQ_AVATAR_URL.format(uid=uid)))
-            name = display_name_fn(uid, info, viewer)
+            name = display_name_fn(uid, info)
             tz_label = str(info.get("tz", "?"))
             if tz_label.upper().startswith("UTC"):
                 tz_display = tz_label

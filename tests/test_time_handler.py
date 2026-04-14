@@ -4,113 +4,7 @@ from types import SimpleNamespace
 from handlers.time_handler import TimeCommandHandler
 from services.storage_service import StorageService
 from services.time_service import TimeService
-
-
-class FakeRenderService:
-    def render_entries(self, event, entries, header, display_name_fn, viewer=None):
-        return [f"{header}:{len(entries)}"]
-
-
-class FakeBot:
-    def __init__(self, members=None):
-        self._members = members or []
-
-    async def call_action(self, action, **kwargs):
-        if action == "get_group_member_list":
-            return self._members
-        raise AssertionError(f"unexpected action: {action}")
-
-
-class At:
-    def __init__(self, qq):
-        self.qq = qq
-
-
-class MsgObj:
-    def __init__(self, self_id="", sender=None):
-        self.self_id = self_id
-        self.raw_message = {
-            "self_id": self_id,
-            "sender": sender or {},
-        }
-
-
-class FakeEvent:
-    def __init__(
-        self,
-        message_str,
-        group_id=None,
-        sender_id="1000",
-        sender_name="tester",
-        admin=False,
-        platform="aiocqhttp",
-        messages=None,
-        group_members=None,
-        sender_card=None,
-        group_obj=None,
-        bot=None,
-    ):
-        self.message_str = message_str
-        self._group_id = group_id
-        self._sender_id = sender_id
-        self._sender_name = sender_name
-        self._admin = admin
-        self._platform = platform
-        self._messages = messages or []
-        self._group_members = group_members or {}
-        self._group_obj = group_obj
-        self.bot = bot
-        self.message_obj = MsgObj(
-            sender={
-                "card": sender_card or "",
-                "nickname": sender_name,
-            }
-        )
-
-    def get_group_id(self):
-        return self._group_id
-
-    def get_sender_id(self):
-        return self._sender_id
-
-    def get_sender_name(self):
-        return self._sender_name
-
-    def get_platform_name(self):
-        return self._platform
-
-    def get_messages(self):
-        return self._messages
-
-    def is_admin(self):
-        return self._admin
-
-    async def get_group(self, group_id=None, **kwargs):
-        if self._group_obj is not None:
-            return self._group_obj
-        members = []
-        for uid, member in self._group_members.items():
-            if isinstance(member, dict):
-                members.append({"user_id": uid, **member})
-                continue
-            members.append(
-                SimpleNamespace(
-                    user_id=uid,
-                    card=member[0] if isinstance(member, tuple) else member,
-                    nickname=member[1] if isinstance(member, tuple) else member,
-                )
-            )
-        return SimpleNamespace(members=members)
-
-    def plain_result(self, text):
-        return text
-
-    def chain_result(self, chain):
-        return chain
-
-
-async def _collect(async_gen):
-    return [item async for item in async_gen]
+from tests.helpers import FakeBot, FakeEvent, FakeRenderService, collect
 
 
 def test_time_route_unknown_subcommand(tmp_path):
@@ -120,7 +14,7 @@ def test_time_route_unknown_subcommand(tmp_path):
         handler = TimeCommandHandler(storage, TimeService(), FakeRenderService())
 
         event = FakeEvent("/time what", group_id="g1")
-        result = await _collect(handler.handle(event))
+        result = await collect(handler.handle(event))
         assert len(result) == 1
         assert "未知子命令：what" in result[0]
 
@@ -134,7 +28,7 @@ def test_time_requires_group_for_default_show(tmp_path):
         handler = TimeCommandHandler(storage, TimeService(), FakeRenderService())
 
         event = FakeEvent("/time")
-        result = await _collect(handler.handle(event))
+        result = await collect(handler.handle(event))
         assert result == ["该指令只能在群组中使用"]
 
     asyncio.run(_run())
@@ -152,9 +46,9 @@ def test_time_set_and_list_routes(tmp_path):
             sender_id="u1",
             sender_name="用户名",
             sender_card="当前群名片",
-            group_members={"u1": ("", "用户名")},
+            group_members={"u1": ("当前群名片", "用户名")},
         )
-        set_result = await _collect(handler.handle(set_evt))
+        set_result = await collect(handler.handle(set_evt))
         assert "已登记 当前群名片 的时区为 UTC+08:00" in set_result[0]
 
         list_evt = FakeEvent(
@@ -163,16 +57,16 @@ def test_time_set_and_list_routes(tmp_path):
             sender_id="u1",
             sender_name="用户名",
             sender_card="当前群名片",
-            group_members={"u1": ("", "用户名")},
+            group_members={"u1": ("当前群名片", "用户名")},
         )
-        list_result = await _collect(handler.handle(list_evt))
+        list_result = await collect(handler.handle(list_evt))
         assert "本群已登记 1 人" in list_result[0]
         assert "当前群名片" in list_result[0]
 
     asyncio.run(_run())
 
 
-def test_time_does_not_fallback_to_username_when_card_is_blank(tmp_path):
+def test_time_falls_back_to_username_when_card_is_blank(tmp_path):
     async def _run():
         storage = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
         await storage.initialize()
@@ -186,9 +80,8 @@ def test_time_does_not_fallback_to_username_when_card_is_blank(tmp_path):
             sender_card="",
             group_members={"u1": ("", "用户名")},
         )
-        set_result = await _collect(handler.handle(set_evt))
-        assert "已登记 u1 的时区为 UTC+08:00" in set_result[0]
-        assert "用户名" not in set_result[0]
+        set_result = await collect(handler.handle(set_evt))
+        assert "已登记 用户名 的时区为 UTC+08:00" in set_result[0]
 
         list_evt = FakeEvent(
             "/time list",
@@ -198,9 +91,43 @@ def test_time_does_not_fallback_to_username_when_card_is_blank(tmp_path):
             sender_card="",
             group_members={"u1": ("", "用户名")},
         )
-        list_result = await _collect(handler.handle(list_evt))
-        assert "u1" in list_result[0]
-        assert "用户名" not in list_result[0]
+        list_result = await collect(handler.handle(list_evt))
+        assert "用户名" in list_result[0]
+        assert "· u1" not in list_result[0]
+
+    asyncio.run(_run())
+
+
+def test_time_list_uses_raw_aiocqhttp_nickname_when_card_is_blank(tmp_path):
+    async def _run():
+        storage = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
+        await storage.initialize()
+        await storage.upsert_timezone("g1", "u1", "Asia/Shanghai")
+        handler = TimeCommandHandler(storage, TimeService(), FakeRenderService())
+
+        group_obj = SimpleNamespace(
+            members=[
+                SimpleNamespace(user_id="u1", nickname="AstrBot昵称"),
+            ]
+        )
+        bot = FakeBot(
+            members=[
+                {"user_id": "u1", "card": "", "nickname": "AstrBot昵称"},
+            ]
+        )
+        event = FakeEvent(
+            "/time list",
+            group_id="g1",
+            sender_id="u1",
+            sender_name="AstrBot昵称",
+            sender_card="",
+            group_obj=group_obj,
+            bot=bot,
+        )
+        result = await collect(handler.handle(event))
+
+        assert "AstrBot昵称" in result[0]
+        assert "· u1" not in result[0]
 
     asyncio.run(_run())
 
@@ -234,12 +161,38 @@ def test_time_list_uses_raw_aiocqhttp_group_cards_when_get_group_only_has_nickna
             group_obj=group_obj,
             bot=bot,
         )
-        result = await _collect(handler.handle(event))
+        result = await collect(handler.handle(event))
 
         assert "发送者群名片" in result[0]
         assert "目标群名片" in result[0]
         assert "发送者昵称" not in result[0]
         assert "目标昵称" not in result[0]
+
+    asyncio.run(_run())
+
+
+def test_time_list_uses_raw_aiocqhttp_nickname_when_card_is_blank_for_other_member(tmp_path):
+    async def _run():
+        storage = StorageService(sqlite_db_path=tmp_path / "data_v4.db")
+        await storage.initialize()
+        await storage.upsert_timezone("g1", "u2", "Europe/London")
+        handler = TimeCommandHandler(storage, TimeService(), FakeRenderService())
+
+        bot = FakeBot(
+            members=[
+                {"user_id": "u2", "card": "", "nickname": "目标昵称"},
+            ]
+        )
+        event = FakeEvent(
+            "/time list",
+            group_id="g1",
+            sender_id="viewer1",
+            bot=bot,
+        )
+        result = await collect(handler.handle(event))
+
+        assert "目标昵称" in result[0]
+        assert "· u2" not in result[0]
 
     asyncio.run(_run())
 
@@ -258,7 +211,7 @@ def test_time_list_prefers_alias_over_group_card(tmp_path):
             sender_id="viewer1",
             group_members={"u1": ("当前群名片", "用户名")},
         )
-        result = await _collect(handler.handle(event))
+        result = await collect(handler.handle(event))
 
         assert "老王" in result[0]
         assert "当前群名片" not in result[0]
@@ -285,7 +238,7 @@ def test_time_list_matches_db_users_to_group_member_cards(tmp_path):
                 "u2": {"card": "目标群名片", "nickname": "目标昵称"},
             },
         )
-        result = await _collect(handler.handle(event))
+        result = await collect(handler.handle(event))
 
         assert "发送者群名片" in result[0]
         assert "目标群名片" in result[0]

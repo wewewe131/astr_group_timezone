@@ -13,8 +13,7 @@ try:
     )
     from ..core.parsers import (
         drop_at_tokens,
-        extract_at_targets,
-        extract_text_without_mentions,
+        extract_mentions_and_text,
         strip_cmd_prefix,
     )
     from ..services.storage_service import StorageService
@@ -29,8 +28,7 @@ except ImportError:  # pragma: no cover - local direct-import fallback
     )
     from core.parsers import (
         drop_at_tokens,
-        extract_at_targets,
-        extract_text_without_mentions,
+        extract_mentions_and_text,
         strip_cmd_prefix,
     )
     from services.storage_service import StorageService
@@ -42,11 +40,10 @@ class AliasCommandHandler:
 
     async def handle(self, event: Any):
         tokens = strip_cmd_prefix(event.message_str or "", names=("alias", "别名"))
-        at_targets = extract_at_targets(event)
+        at_targets, text_without_mentions = extract_mentions_and_text(event)
         owner = str(event.get_sender_id())
 
         clean = drop_at_tokens(tokens)
-        text_without_mentions = extract_text_without_mentions(event)
         text_tokens = strip_cmd_prefix(text_without_mentions, names=("alias", "别名"))
 
         if not at_targets:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 from typing import Any
 
 try:
@@ -14,6 +13,7 @@ try:
         TIME_UNSET_ALIASES,
     )
     from ..core.parsers import extract_at_targets, strip_cmd_prefix
+    from ..services.group_member_service import GroupMemberService
     from ..services.render_service import RenderService
     from ..services.storage_service import StorageService
     from ..services.time_service import TimeService
@@ -28,6 +28,7 @@ except ImportError:  # pragma: no cover - local direct-import fallback
         TIME_UNSET_ALIASES,
     )
     from core.parsers import extract_at_targets, strip_cmd_prefix
+    from services.group_member_service import GroupMemberService
     from services.render_service import RenderService
     from services.storage_service import StorageService
     from services.time_service import TimeService
@@ -39,108 +40,15 @@ class TimeCommandHandler:
         storage: StorageService,
         time_service: TimeService,
         render_service: RenderService,
+        group_member_service: GroupMemberService | None = None,
     ):
         self.storage = storage
         self.time_service = time_service
         self.render_service = render_service
+        self.group_member_service = group_member_service or GroupMemberService()
 
     def _display_name(self, uid: str, info: dict | None = None, viewer: str | None = None) -> str:
         return self.time_service.display_name(uid, info=info)
-
-    def _sender_group_name(self, event: Any) -> str | None:
-        message_obj = getattr(event, "message_obj", None)
-        raw_message = getattr(message_obj, "raw_message", None)
-        sender = (
-            raw_message.get("sender")
-            if isinstance(raw_message, dict)
-            else getattr(raw_message, "sender", None)
-        ) or getattr(message_obj, "sender", None)
-        if isinstance(sender, dict):
-            if "card" in sender:
-                return str(sender.get("card") or "").strip()
-            return str(sender.get("nickname") or "").strip()
-        if hasattr(sender, "card"):
-            return str(getattr(sender, "card", "") or "").strip()
-        return str(getattr(sender, "nickname", "") or "").strip() or None
-
-    def _member_field(self, member: Any, field: str) -> Any:
-        if isinstance(member, dict):
-            return member.get(field)
-        return getattr(member, field, None)
-
-    def _member_group_name(self, member: Any) -> str | None:
-        if isinstance(member, dict):
-            if "card" in member:
-                return str(member.get("card") or "").strip()
-            return str(member.get("nickname") or "").strip() or None
-        if hasattr(member, "card"):
-            return str(getattr(member, "card", "") or "").strip()
-        return str(getattr(member, "nickname", "") or "").strip() or None
-
-    async def _group_members(self, group: Any) -> list[Any]:
-        if isinstance(group, dict):
-            members = group.get("members")
-            if members is not None:
-                return list(members)
-            members = group.get("member_list")
-            return list(members or [])
-
-        members = getattr(group, "members", None)
-        if members is not None:
-            return list(members)
-
-        members = getattr(group, "member_list", None)
-        if members is not None:
-            return list(members)
-
-        get_members = getattr(group, "get_members", None)
-        if callable(get_members):
-            members = get_members()
-            if inspect.isawaitable(members):
-                members = await members
-            return list(members or [])
-
-        return []
-
-    async def _live_group_members(self, event: Any, group_id: str) -> list[Any]:
-        platform = ""
-        try:
-            platform = str(event.get_platform_name() or "")
-        except Exception:
-            platform = ""
-
-        # AstrBot's aiocqhttp get_group() currently flattens members into
-        # MessageMember(user_id, nickname), which loses the original `card`
-        # field and prefers nickname over group card. Query the raw member list
-        # first so we can still prefer card when building display names.
-        if platform == "aiocqhttp":
-            bot = getattr(event, "bot", None)
-            call_action = getattr(bot, "call_action", None)
-            if callable(call_action):
-                raw_group_id: str | int = group_id
-                if str(group_id).isdigit():
-                    raw_group_id = int(group_id)
-                try:
-                    members = await call_action(
-                        "get_group_member_list",
-                        group_id=raw_group_id,
-                    )
-                    if members is not None:
-                        return list(members)
-                except Exception:
-                    pass
-
-        if not hasattr(event, "get_group"):
-            return []
-
-        try:
-            group = event.get_group(group_id)
-            if inspect.isawaitable(group):
-                group = await group
-        except Exception:
-            return []
-
-        return await self._group_members(group)
 
     async def _load_users(
         self,
@@ -158,16 +66,9 @@ class TimeCommandHandler:
             target_uids=target_uids,
         )
         wanted = {str(uid) for uid in (target_uids or list(users))}
-        names: dict[str, str] = {}
-        for member in await self._live_group_members(event, str(group_id)):
-            uid = str(self._member_field(member, "user_id") or "")
-            if not uid or uid not in wanted:
-                continue
-            name = self._member_group_name(member)
-            if name is not None:
-                names[uid] = name
+        names = await self.group_member_service.member_names(event, str(group_id), wanted)
         sender_uid = str(event.get_sender_id())
-        sender_name = self._sender_group_name(event)
+        sender_name = self.group_member_service.sender_name(event)
         if sender_uid in wanted and sender_name is not None and not names.get(sender_uid):
             names[sender_uid] = sender_name
         users = {
@@ -302,7 +203,7 @@ class TimeCommandHandler:
         uid = str(event.get_sender_id())
         await self.storage.upsert_timezone(str(group_id), uid, canonical)
         _, _, _, names = await self._load_users(event, [uid])
-        sender_name = self._sender_group_name(event)
+        sender_name = self.group_member_service.sender_name(event)
         resolved_names = names
         if sender_name is not None and not names.get(uid):
             resolved_names = {**names, uid: sender_name}
